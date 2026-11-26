@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Model weights (downloaded separately, too large for Git)
+*.pt
+*.pth
+*.onnx
+
+# Data and videos
+data/
+*.mp4
+*.avi
+*.mov
+
+# Generated outputs
+runs/
+outputs/
+
+# OS / editor files
+.DS_Store
+Thumbs.db
+.vscode/
