@@ -26,3 +26,6 @@ outputs/
 .DS_Store
 Thumbs.db
 .vscode/
+
+# Secrets
+.env
