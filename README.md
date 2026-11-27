@@ -1,148 +1,146 @@
 # Vehicle Detection, Tracking and License Plate Recognition
 
-A computer-vision pipeline that tracks vehicles in traffic video, finds the license plate of each vehicle, reads it several times, and reports one final plate text per vehicle. If it cannot detect or read a plate, it says so instead of guessing.
+An end-to-end pipeline that takes a traffic video and, for every vehicle, produces a stable tracking ID and the text of its license plate. It runs in Google Colab and uses pretrained models (no training was done in this project).
 
-[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/AwsHamed/vehicle-tracking-alpr/blob/main/notebooks/01_vehicle_tracking_alpr.ipynb)
+**Output for each run**
 
----
+- `plates.txt`: one line per tracked vehicle (`id,plate,valid_reads,avg_conf`)
+- `output_final.mp4`: the input video with a box around each vehicle and its ID and plate text above the box
 
-## Overview
-
-OCR on a single frame of a moving vehicle is unreliable: angle, motion blur and small plate size all cause errors. This project handles plate reading **per vehicle** instead of per frame:
-
-1. Detect and track vehicles, so each physical vehicle keeps one ID.
-2. Detect the plate inside each vehicle's bounding box.
-3. Keep the best plate crops of that vehicle (largest, not cut off).
-4. Read several crops with a plate-specific OCR model.
-5. Choose one final text from the reads, and write it to `plates.txt` and to an annotated video.
-
-## Pipeline
+## How it works
 
 ```
-Video -> OpenCV -> YOLO11 vehicle detection -> ByteTrack (one ID per vehicle)
-      -> plate detector (inside each vehicle crop) -> best plate crops per vehicle
-      -> plate OCR (fast-plate-ocr) -> consensus read -> plates.txt + annotated video
+Video
+  -> OpenCV             read frames
+  -> YOLO11n            detect vehicles (car, motorcycle, bus, truck)
+  -> ByteTrack          give each vehicle a persistent ID
+  -> plate detector     find the plate inside each vehicle crop
+  -> store crops        keep every plate crop under the vehicle's ID
+  -> select + read      keep the best crops, read them with an OCR model
+  -> vote               pick the final text per vehicle
+  -> plates.txt + final video
 ```
 
-The notebook follows these stages: setup, helper functions, **Stage B** (track vehicles, detect plates, store crops), **Stage C** (read crops, choose one text, write `plates.txt`), **Stage D** (render the annotated video).
+Key design decisions:
+
+1. **Plate detection on vehicle crops, not on the full frame.** Plates are small, so the plate detector only sees the crop of each tracked vehicle.
+2. **One final reading per vehicle, not per frame.** A single frame is unreliable (blur, small plates). All plate crops of a vehicle are collected first; the final text is decided after the whole video is processed.
+3. **Crop selection.** A stored crop is read only if it is not cut off by the vehicle-crop border, is at least 15 px tall, and has a width/height ratio between 2.0 and 5.5. The 5 largest remaining crops are read.
+4. **Voting by agreement.** Among the readings of a vehicle, the one with the smallest total edit distance to all the others is chosen (a median-string choice), which removes random single-frame errors.
+5. **Class-agnostic NMS.** With default settings the detector often returned two boxes on the same vehicle (for example `car` and `truck`), and the tracker gave each box its own ID. Enabling `agnostic_nms=True` fixes this (see Results).
+6. **Final video rendered in a separate pass.** The final plate text is only known after voting, so the tracker output (boxes per frame) is stored and the video is rendered afterwards. No model is re-run, so IDs stay identical.
+
+## Models
+
+| Task | Model |
+|---|---|
+| Vehicle detection | YOLO11n (Ultralytics, COCO classes 2, 3, 5, 7) |
+| Tracking | ByteTrack (Ultralytics), `track_buffer = 90` |
+| Plate detection | `Nuurrr66/license-plate-detector` (Hugging Face, YOLO11-based, class `License_Plate`) |
+| Plate OCR (default) | `fast-plate-ocr`, model `cct-s-v2-global-model` |
+| Plate OCR (alternative) | EasyOCR (`OCR_ENGINE = "easyocr"`) |
 
 ## Results
 
-All numbers come from one test video and from my own manual checks. Treat them as indicative, not as a benchmark.
+Evaluated on one traffic video (1,285 frames). All numbers below were measured on this video only.
 
-**Test video:** a road-traffic clip of 1285 frames. It is not included in this repository.
+**Tracking**
 
-### Tracking and coverage
-
-| Item | Value |
-|---|---|
-| Vehicles tracked (final run) | 29 |
-| Vehicles on the main road (manual count) | 24 |
-| Vehicles on a side road (approximate manual count) | 5 |
-| Main-road vehicles with a plate text in the output | 24 of 24 |
-| Side-road vehicles | `NO_PLATE_DETECTED` (3) or `UNREADABLE` (2) |
-
-### Plate reading accuracy
-
-I read the plates by eye from the video for 20 of the 24 main-road vehicles. The other 4 could not be verified, so they are not scored.
-
-| Metric (20 hand-labeled plates) | Value |
-|---|---|
-| Exact match (every character correct) | 8 / 20 |
-| At most 1 wrong character | 18 / 20 |
-| At most 2 wrong characters | 20 / 20 |
-| Mean character error rate (CER) | 0.11 |
-
-A plate counts as wrong here if **any** character differs. Most errors are a single character (for example `0` vs `O`, `8` vs `B`, `5` vs `S`).
-
-### What each choice changed
-
-Measured on an earlier run of the same video and the same 20 labeled plates. Lower CER is better.
-
-| OCR setup | Single read CER | Final (consensus) CER |
+| Setting | Tracked IDs | Frames with overlapping boxes (IoU > 0.5) |
 |---|---|---|
-| EasyOCR | 0.44 | 0.39 |
-| fast-plate-ocr | 0.26 | 0.23 |
-| fast-plate-ocr + prefix rule | 0.15 | 0.12 |
+| Default NMS | 90 | 183 |
+| `agnostic_nms=True` | **32** | **6** |
 
-- Switching from a general OCR (EasyOCR) to a plate-specific OCR gave the largest gain.
-- Combining several reads helped, but only modestly (0.15 to 0.12).
-- Image enhancement before OCR (upscale, CLAHE, sharpen, denoise) gave no clear gain. Differences were 0.02 CER or less, which is within noise on 20 plates, so no enhancement is used.
-- One box per object (`agnostic_nms=True`): without it, the vehicle detector often returned the same object twice with two classes (for example car and truck). Frames with duplicate boxes dropped from 183 to 6, and the number of track IDs from 90 to 32 (earlier run).
+Changing only the NMS setting removed 58 of the 90 IDs: they came from duplicate boxes on the same vehicle (for example a `car` box and a `truck` box).
 
-## Method and design decisions
+**Plate output for all 32 tracked vehicles** (this includes vehicles on the side of the road, which are outside the evaluation scope below)
 
-- **YOLO11n for vehicles** (COCO classes car, motorcycle, bus, truck): small and fast on a free Colab GPU.
-- **ByteTrack** with `track_buffer = 90`: it also matches low-confidence detections to existing tracks, so a partly hidden vehicle keeps its ID longer. It uses motion and overlap only (no appearance model), so ID switches are possible when vehicles cross.
-- **Plate detection inside each vehicle crop:** this links every plate to its vehicle ID directly and keeps the search area small.
-- **Best crops, not all crops:** crops are ranked by size. Plates that touch the edge of the vehicle crop (cut off), are shorter than 15 px, or have an unusual width/height ratio are ignored. The 5 best crops of each vehicle are read.
-- **Consensus read:** from the reads of one vehicle, the text with the smallest total Levenshtein distance to the other reads is chosen. This is not character-by-character voting.
-- **Plate-specific OCR (fast-plate-ocr):** clearly better than EasyOCR on these crops.
-- **Prefix rule:** the plates in my test video start with the letter `B`, so a wrong or missing first character is corrected. This rule is specific to this video and is switched off with `PLATE_PREFIX = None`.
-- **No guessing without evidence:** a vehicle with no plate detection gets `NO_PLATE_DETECTED`, and one with no usable read gets `UNREADABLE`.
+| Outcome | Vehicles |
+|---|---|
+| Plate text produced | 25 |
+| Plate detected but not readable (`UNREADABLE`) | 4 |
+| No plate detected (`NO_PLATE_DETECTED`) | 3 |
 
-## Evaluation methodology
+**Evaluation scope and manual verification**
 
-Ground truth was written by hand from the video. A `?` marks a character I could not read with certainty and counts as a wildcard when scoring. Character error rate is the edit distance between the output and the ground truth, divided by the length of the ground truth.
+The evaluation covers the vehicles on the **main road**, which is the area of interest of this project. It does not cover vehicles passing on the side of the road: they appear very small and only for a short time, so a human cannot read their plates in the video and the OCR output for them cannot be verified. They are tracked and may receive a plate text, but they are not counted in any number below.
 
-Ground truth is tied to the **track IDs of one run**. IDs change when tracking settings change, so it must be checked again after any change.
+The author compared the system output with the plates visible in the video:
 
-The real plate texts are **not published** in this repository. The evaluation cells read a local `ground_truth.csv` (columns `track_id,plate_text`, for example `1,AB123`) and are skipped when the file is missing.
+- 22 main-road vehicles with plates legible to a human observer were evaluated.
+- **17 of these 22 (77%)** were read exactly.
+- The other 5 were close but not identical (a small number of characters differ).
+
+How to read these numbers:
+
+- The scope is defined by where the vehicle is and by whether a human can read its plate, not by what the system output.
+- The sample is small (22 plates), it comes from the same video that was used during development, and there is no separate test set.
+- The 77% is the accuracy on legible main-road plates. It is not an accuracy figure for every tracked vehicle.
+- A character-level error rate was not recomputed after the labels were corrected.
 
 ## Limitations
 
-- One short video, one camera angle. The numbers are not a benchmark.
-- The same 20 plates were used to choose the OCR engine, the prefix rule and the enhancement mode. There is no separate test set.
-- Exact match is only 8 / 20: most plates are almost right, but one wrong character makes the plate wrong.
-- 4 main-road vehicles have an output text that I could not verify by eye.
-- The plate OCR confidence is not used (`avg_conf` in `plates.txt` is always 0.00). A read is rejected only when there is no usable crop or text, never because of low quality, so unreliable reads can still get a text.
-- The prefix rule fits only the plates of this video.
-- ByteTrack has no appearance model, so ID switches are possible when vehicles cross.
-- Side-road vehicles are far from the camera: their plates were not detected or not readable.
+- **Resolution is the main limit.** Many plate crops are only 15 to 55 px tall. Vehicles whose plates are smaller than that end up `UNREADABLE`.
+- **`PLATE_PREFIX = "B"` is specific to this video.** The plates here start with `B`; a rule that drops a junk character before the `B` or adds a missing `B` is applied to each reading. For any other camera or country, set `PLATE_PREFIX = None`.
+- **Single video, small evaluation** (see above).
+- **Side-of-road vehicles are not evaluated.** They are tracked and may get a plate text, but that text is unverified.
+- **Possible ID fragmentation.** A vehicle that disappears for a long time can still get a new ID, which creates a second line in `plates.txt`.
+- **`avg_conf` is `0.00`** with the default OCR engine (its confidence is not extracted). It is only populated with EasyOCR.
+- Models are pretrained and were not fine-tuned on this camera.
 
-## Possible improvements
+## Run it
 
-- Use the OCR confidence to reject weak reads and to weight the consensus.
-- Define a region of interest so only the main road is processed and counted.
-- Pick crops from different moments of the track instead of the largest ones, so errors are less correlated.
-- Evaluate on a second video with new hand-labeled plates.
+1. Open the notebook in Google Colab and select a GPU runtime (Runtime, Change runtime type, T4).
+2. Upload your video and set `VIDEO_PATH` in the config cell (the video is not included in this repository).
+3. Run the cells in order: setup, imports, config, tracker config, models, helpers, then:
+   - **Stage B**: track vehicles, detect plates, store crops (slowest step)
+   - **Stage C**: read the crops, vote, write `plates.txt`
+   - **Stage D**: render `output_final.mp4`
+4. Re-run the vehicle-model cell (`model = YOLO(...)`) before every new run, because the tracker state is stored inside the model object.
 
-## How to run
-
-1. Click the **Open in Colab** badge.
-2. `Runtime` -> `Change runtime type` -> select a GPU.
-3. Upload your video to Colab as `/content/traffic.mp4` (or change `VIDEO_PATH` in the config cell).
-4. Run sections 0-6 once, then Stage B, Stage C and (optionally) Stage D.
-5. Before rendering a video you want to share, set `MASK_PLATES = True` in the config cell.
-
-## Repository structure
+Dependencies:
 
 ```
-notebooks/   01_vehicle_tracking_alpr.ipynb
-README.md
-requirements.txt
-LICENSE
+pip install ultralytics lap easyocr rapidfuzz "fast-plate-ocr[onnx]"
 ```
 
-## Data, models, licenses and privacy
+## Main settings
 
-- **Test video:** a road-traffic clip. It is not included in this repository and is not redistributed.
-- **Vehicle detector:** YOLO11n weights from Ultralytics (Ultralytics is licensed AGPL-3.0).
-- **Plate detector:** `Nuurrr66/license-plate-detector` from Hugging Face. It is a third-party model used as it is. Its model card does not state a license or the training data. It is downloaded when the notebook runs and is not redistributed here.
-- **Plate OCR:** [fast-plate-ocr](https://github.com/ankandrew/fast-plate-ocr) (MIT) with the `cct-s-v2-global-model` pretrained model. See the project's model zoo for the model's terms. EasyOCR is used only for the comparison.
-- **Privacy:** license plates can identify people. This repository contains no real plate texts and no plate images. Any video or image shared from this project should be rendered with `MASK_PLATES = True` and checked by eye, because masking only covers plates the detector found.
+| Variable | Value | Meaning |
+|---|---|---|
+| `CONF_THRESHOLD` | 0.3 | Vehicle detection confidence |
+| `TRACK_BUFFER` | 90 | Frames a lost vehicle is remembered (about 3 s at 30 FPS) |
+| `AGNOSTIC_NMS` | `True` | One box per object even if two classes were predicted |
+| `PLATE_CONF` | 0.25 | Plate detection confidence |
+| `OCR_ENGINE` | `"fast"` | `"fast"` (plate-specific) or `"easyocr"` |
+| `OCR_TOP_K` | 5 | Plate crops read per vehicle |
+| `MIN_PLATE_H` | 15 | Minimum plate height in pixels |
+| `MIN_RATIO` / `MAX_RATIO` | 2.0 / 5.5 | Accepted plate width/height ratio |
+| `MIN_TEXT_LEN` | 4 | Shortest accepted OCR reading |
+| `PLATE_PREFIX` | `"B"` | Dataset-specific format rule (`None` to disable) |
+| `ENHANCE_MODE` | `"none"` | Optional image enhancement before OCR (not evaluated) |
 
-## Acknowledgments
+## Output format
 
-- [Ultralytics YOLO11](https://github.com/ultralytics/ultralytics)
-- ByteTrack: Zhang et al., *ByteTrack: Multi-Object Tracking by Associating Every Detection Box*, ECCV 2022
-- [fast-plate-ocr](https://github.com/ankandrew/fast-plate-ocr) by ankandrew
-- [EasyOCR](https://github.com/JaidedAI/EasyOCR)
+`plates.txt`:
 
-## Author
+```
+id,plate,valid_reads,avg_conf
+24,B065FY,5,0.00
+30,UNREADABLE,0,0.00
+45,NO_PLATE_DETECTED,0,0.00
+```
 
-**Aws Hamed** - [GitHub](https://github.com/AwsHamed) - [LinkedIn](https://www.linkedin.com/in/aws-hamed-080244433)
+`valid_reads` is the number of readings that passed the length filter before voting; low values (1 to 3) mean the plate is less reliable.
 
-## License
+## Future work
 
-MIT for the code in this repository. Models, data and libraries keep their own licenses.
+- Evaluate on a held-out set of plates that were not used during development.
+- Recompute a character-level error rate and compare OCR engines again using the corrected labels.
+- Fine-tune the plate OCR on more labeled plates from this camera.
+- Reduce ID fragmentation (for example by merging IDs that read the same plate).
+- Add per-class statistics (vehicle counts by type).
+
+## Privacy and licenses
+
+License plates can identify people. Before sharing the output video or screenshots publicly, blur the plates or crop them out. Check the license of the input video and of the third-party models (YOLO11 / Ultralytics, the Hugging Face plate detector, `fast-plate-ocr`, EasyOCR) before redistributing anything.
