@@ -1,0 +1,22 @@
+# Vehicle Detection, Tracking and License Plate Recognition
+#
+# Install with:  pip install -r requirements.txt
+#
+# Versions are intentionally not pinned (the exact versions used were not recorded).
+# To pin them, run this in the Colab session where the notebook works and paste the output here:
+#   !pip freeze | grep -i -E "^(ultralytics|lap|easyocr|fast-plate-ocr|rapidfuzz|huggingface-hub)=="
+#
+# PyTorch and OpenCV are installed as dependencies of ultralytics / easyocr, and Colab already provides them,
+# so they are not listed here.
+
+# Vehicle detection and tracking (YOLO11 + ByteTrack)
+ultralytics
+lap>=0.5.12              # required by ByteTrack
+
+# License plate OCR
+fast-plate-ocr[onnx]     # default engine (plate-specific model)
+easyocr                  # alternative engine (OCR_ENGINE = "easyocr")
+
+# Utilities
+rapidfuzz                # edit distance (voting between OCR readings)
+huggingface_hub          # downloads the plate detector weights
